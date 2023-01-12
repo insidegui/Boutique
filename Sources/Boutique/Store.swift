@@ -1,6 +1,7 @@
 @_exported import Bodega
 import OrderedCollections
 import Foundation
+import Combine
 
 /// A fancy persistence layer.
 ///
@@ -44,6 +45,8 @@ import Foundation
 /// That is *not* required though, and you are free to use any `String` property on your `Item`
 /// or even a type which can be converted into a `String` such as `\.url.path`.
 public final class Store<Item: Codable & Equatable>: ObservableObject {
+
+    private lazy var cancellables = Set<AnyCancellable>()
 
     private let storageEngine: StorageEngine
     private let cacheIdentifier: KeyPath<Item, String>
@@ -97,6 +100,7 @@ public final class Store<Item: Codable & Equatable>: ObservableObject {
 
         // Begin loading items in the background.
         _ = self.loadStoreTask
+        _ = self.subscribeToNotifyingStoreTask
     }
 
     /// Initializes a new ``Store`` for persisting items to a memory cache
@@ -305,6 +309,39 @@ public final class Store<Item: Codable & Equatable>: ObservableObject {
         let decoder = JSONDecoder()
         self.items = try await self.storageEngine.readAllData()
             .map({ try decoder.decode(Item.self, from: $0) })
+    }
+
+    private lazy var subscribeToNotifyingStoreTask: Task<Void, Never> = Task { @MainActor in
+        guard let notifyingEngine = self.storageEngine as? NotifyingStorageEngine else { return }
+
+        await notifyingEngine.observeNotifications()
+
+        await notifyingEngine.didCreateItems.sink { _ in
+            Task { @MainActor in
+                let decoder = JSONDecoder()
+                self.items = try await self.storageEngine.readAllData()
+                    .map({ try decoder.decode(Item.self, from: $0) })
+            }
+        }
+        .store(in: &cancellables)
+
+        await notifyingEngine.didUpdateItems.sink { _ in
+            Task { @MainActor in
+                let decoder = JSONDecoder()
+                self.items = try await self.storageEngine.readAllData()
+                    .map({ try decoder.decode(Item.self, from: $0) })
+            }
+        }
+        .store(in: &cancellables)
+
+        await notifyingEngine.didRemoveItems.sink { _ in
+            Task { @MainActor in
+                let decoder = JSONDecoder()
+                self.items = try await self.storageEngine.readAllData()
+                    .map({ try decoder.decode(Item.self, from: $0) })
+            }
+        }
+        .store(in: &cancellables)
     }
 
 }
