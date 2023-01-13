@@ -42,6 +42,7 @@ public extension Store {
         /// but it also means you need to choose well thought out and uniquely identifying `cacheIdentifier`s.
         /// - Parameters:
         ///   - item: The item you are inserting into the ``Store``.
+        @discardableResult
         public func insert(_ item: Item) async throws -> Operation {
             if case .removeItems(let removedItems) = self.operations.last?.action {
                 self.operations.removeLast()
@@ -85,6 +86,7 @@ public extension Store {
         /// multiple times to avoid making multiple separate dispatches to the `@MainActor`.
         /// - Parameters:
         ///   - items: The items to insert into the store.
+        @discardableResult
         public func insert(_ items: [Item]) async throws -> Operation {
             if case .removeItems(let removedItems) = self.operations.last?.action {
                 self.operations.removeLast()
@@ -109,6 +111,7 @@ public extension Store {
 
         /// Removes an item from the ``Store``.
         /// - Parameter item: The item you are removing from the ``Store``.
+        @discardableResult
         public func remove(_ item: Item) async throws -> Operation {
             self.operations.append(ExecutableAction(action: .removeItem(item), executable: {
                 try await $0.performRemove(item)
@@ -122,6 +125,7 @@ public extension Store {
         /// Prefer removing multiple items using this method instead of calling ``remove(_:)-8ufsb``
         /// multiple times to avoid making multiple separate dispatches to the `@MainActor`.
         /// - Parameter item: The items you are removing from the `Store`.
+        @discardableResult
         public func remove(_ items: [Item]) async throws -> Operation {
             self.operations.append(ExecutableAction(action: .removeItems(items), executable: {
                 try await $0.performRemove(items)
@@ -136,6 +140,7 @@ public extension Store {
         /// ``remove(_:)-8ufsb`` or ``remove(_:)-2tqlz`` multiple times.
         /// This method handles removing all of the data in one operation rather than iterating over every item
         /// in the ``Store``, avoiding multiple dispatches to the `@MainActor`, with far better performance.
+        @discardableResult
         public func removeAll() async throws -> Operation {
             self.operations.append(ExecutableAction(action: .removeAll, executable: {
                 try await $0.performRemoveAll()
