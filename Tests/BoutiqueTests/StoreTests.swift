@@ -5,6 +5,7 @@ import XCTest
 final class StoreTests: XCTestCase {
 
     private var store: Store<BoutiqueItem>!
+    private var broker: TestStoreBroker!
     private var cancellables: Set<AnyCancellable> = []
 
     override func setUp() async throws {
@@ -14,9 +15,11 @@ final class StoreTests: XCTestCase {
         func makeNonAsyncStore() -> Store<BoutiqueItem> {
             Store<BoutiqueItem>(
                 storage: SQLiteStorageEngine.default(appendingPath: "Tests"),
+                broker: broker,
                 cacheIdentifier: \.merchantID)
         }
-        
+
+        broker = TestStoreBroker()
         store = makeNonAsyncStore()
         try await store.removeAll()
     }
@@ -33,6 +36,9 @@ final class StoreTests: XCTestCase {
         try await store.insert(BoutiqueItem.belt)
         XCTAssertTrue(store.items.contains(BoutiqueItem.belt))
         XCTAssertEqual(store.items.count, 2)
+
+        XCTAssertTrue(broker.storeEvents.contains(.update([CacheKey(BoutiqueItem.coat.id)])))
+        XCTAssertTrue(broker.storeEvents.contains(.update([CacheKey(BoutiqueItem.belt.id)])))
     }
 
     @MainActor
@@ -41,6 +47,8 @@ final class StoreTests: XCTestCase {
         XCTAssertTrue(store.items.contains(BoutiqueItem.coat))
         XCTAssertTrue(store.items.contains(BoutiqueItem.sweater))
         XCTAssertTrue(store.items.contains(BoutiqueItem.purse))
+
+        XCTAssertTrue(broker.storeEvents.contains(.update([BoutiqueItem.coat, BoutiqueItem.sweater, BoutiqueItem.purse].map { CacheKey($0.id) })))
     }
 
     @MainActor
@@ -92,6 +100,9 @@ final class StoreTests: XCTestCase {
         try await store.remove([BoutiqueItem.sweater, BoutiqueItem.purse])
         XCTAssertFalse(store.items.contains(BoutiqueItem.sweater))
         XCTAssertFalse(store.items.contains(BoutiqueItem.purse))
+
+        XCTAssertTrue(broker.storeEvents.contains(.remove([CacheKey(BoutiqueItem.coat.id)])))
+        XCTAssertTrue(broker.storeEvents.contains(.remove([BoutiqueItem.sweater, BoutiqueItem.purse].map { CacheKey($0.id) })))
     }
 
     @MainActor
@@ -104,6 +115,8 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(store.items.count, 4)
         try await store.removeAll()
         XCTAssertTrue(store.items.isEmpty)
+
+        XCTAssertTrue(broker.storeEvents.contains(.removeAll))
     }
 
     @MainActor
@@ -239,5 +252,20 @@ final class StoreTests: XCTestCase {
         try await store.insert(uniqueItems)
         wait(for: [expectation], timeout: 1)
     }
+
+}
+
+/// A test broker that just saves the events received from the store in a collection.
+private final class TestStoreBroker: StoreBroker {
+
+    var storeToken: StoreToken?
+
+    private(set) var storeEvents = [StoreEvent]()
+
+    func send(_ event: StoreEvent) async {
+        storeEvents.append(event)
+    }
+
+    var events: AsyncStream<StoreEvent> { AsyncStream { _ in } }
 
 }

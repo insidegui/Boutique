@@ -6,7 +6,7 @@ public final class StoreToken: NSObject, NSSecureCoding {
     let storeID: String
     let itemType: String
 
-    init<T>(with store: Store<T>) where T: Codable & Equatable {
+    public init<T>(with store: Store<T>) where T: Codable & Equatable {
         self.storeID = store.id
         self.itemType = String(describing: T.self)
 
@@ -52,8 +52,8 @@ public final class StoreToken: NSObject, NSSecureCoding {
 }
 
 public final class StoreEventWrapper: NSObject, NSSecureCoding {
-    let token: StoreToken
-    let event: StoreEvent
+    public let token: StoreToken
+    public let event: StoreEvent
 
     public init(token: StoreToken, event: StoreEvent) {
         self.token = token

@@ -50,7 +50,7 @@ public final class Store<Item: Codable & Equatable>: ObservableObject {
 
     let id: String
     private let storageEngine: StorageEngine
-    private let broker: StoreBroker
+    let broker: StoreBroker
     private let cacheIdentifier: KeyPath<Item, String>
 
     /// The items held onto by the ``Store``.

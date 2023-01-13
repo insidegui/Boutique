@@ -5,7 +5,7 @@ import Bodega
 /// Represents an event that causes items in a store to be invalidated.
 ///
 /// This type is used by ``StoreBroker`` and its implementations.
-public enum StoreEvent {
+public enum StoreEvent: Hashable {
     /// The store sends this event when items are added or updated.
     case update([Bodega.CacheKey])
     /// The store sends this event when specific items are removed.
