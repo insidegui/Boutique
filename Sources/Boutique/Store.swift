@@ -109,6 +109,7 @@ public final class Store<Item: Codable & Equatable>: ObservableObject {
         broker.attach(self)
 
         _ = self.brokerEventsTask
+        _ = self.storageEventsTask
     }
 
     /// Initializes a new ``Store`` for persisting items to a memory cache
@@ -130,6 +131,7 @@ public final class Store<Item: Codable & Equatable>: ObservableObject {
         broker.attach(self)
 
         _ = self.brokerEventsTask
+        _ = self.storageEventsTask
     }
 
     /// Awaits for ``items`` to be loaded.
@@ -330,6 +332,41 @@ public final class Store<Item: Codable & Equatable>: ObservableObject {
         let decoder = JSONDecoder()
 
         for await event in broker.events {
+            switch event {
+            case .update(let keys):
+                logger.debug("🪄 RECEIVED Update \(keys)")
+
+                do {
+                    let items = try await self.storageEngine
+                        .read(keys: keys)
+                        .map({ try decoder.decode(Item.self, from: $0) })
+
+                    try await performInsert(items, persist: false)
+                } catch {
+                    logger.error("🪄 Error handling broker event: \(error, privacy: .public)")
+                }
+            case .remove(let keys):
+                logger.debug("🪄 RECEIVED Remove \(keys)")
+
+                await removeInMemoryItems(matching: Set(keys.map(\.rawValue)))
+            case .removeAll:
+                logger.debug("🪄 RECEIVED Remove All")
+
+                do {
+                    try await performRemoveAll(persist: false)
+                } catch {
+                    logger.error("🪄 Error handling broker event: \(error, privacy: .public)")
+                }
+            }
+        }
+    }
+
+    private lazy var storageEventsTask: Task<Void, Never> = Task {
+        guard let notifyingEngine = storageEngine as? NotifyingStorageEngine else { return }
+
+        let decoder = JSONDecoder()
+
+        for await event in await notifyingEngine.incomingEvents {
             switch event {
             case .update(let keys):
                 logger.debug("🪄 RECEIVED Update \(keys)")

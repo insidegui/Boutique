@@ -2,18 +2,6 @@ import Foundation
 import OSLog
 import Bodega
 
-/// Represents an event that causes items in a store to be invalidated.
-///
-/// This type is used by ``StoreBroker`` and its implementations.
-public enum StoreEvent: Hashable {
-    /// The store sends this event when items are added or updated.
-    case update([Bodega.CacheKey])
-    /// The store sends this event when specific items are removed.
-    case remove([Bodega.CacheKey])
-    /// The store sends this event when all items are removed.
-    case removeAll
-}
-
 /// A ``StoreBroker`` is responsible for exchanging events between multiple ``Store`` instances that share the same underlying storage.
 ///
 /// You configure a store with a specific broker type by passing an instance of the broker type in the store's initializer.
