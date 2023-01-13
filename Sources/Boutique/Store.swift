@@ -1,6 +1,7 @@
 @_exported @_spi(Boutique) import Bodega
 import OrderedCollections
 import Foundation
+import OSLog
 
 /// A fancy persistence layer.
 ///
@@ -45,6 +46,8 @@ import Foundation
 /// or even a type which can be converted into a `String` such as `\.url.path`.
 public final class Store<Item: Codable & Equatable>: ObservableObject {
 
+    private let logger = Logger(subsystem: kBoutiqueStoreSubsystem, category: "BoutiqueStore")
+
     let id: String
     private let storageEngine: StorageEngine
     private let broker: StoreBroker
@@ -55,11 +58,7 @@ public final class Store<Item: Codable & Equatable>: ObservableObject {
     /// The user can read the state of ``items`` at any time
     /// or subscribe to it however they wish, but you desire making modifications to ``items``
     /// you must use ``insert(_:)-7z2oe``, ``remove(_:)-3nzlq``, or ``removeAll()-9zfmy``.
-    @MainActor @Published public private(set) var items: [Item] = [] {
-        didSet {
-            print("\(id) items:\n\(items.map { "\($0)" }.joined(separator: "\n"))\n#################")
-        }
-    }
+    @MainActor @Published public private(set) var items: [Item] = []
 
     /// Initializes a new ``Store`` for persisting items to a memory cache
     /// and a storage engine, to act as a source of truth.
@@ -333,7 +332,7 @@ public final class Store<Item: Codable & Equatable>: ObservableObject {
         for await event in broker.events {
             switch event {
             case .update(let keys):
-                print("🪄 RECEIVED Update \(keys)")
+                logger.debug("🪄 RECEIVED Update \(keys)")
 
                 do {
                     let items = try await self.storageEngine
@@ -342,19 +341,19 @@ public final class Store<Item: Codable & Equatable>: ObservableObject {
 
                     try await performInsert(items, persist: false)
                 } catch {
-                    print("🪄 Error handling broker event: \(error)")
+                    logger.error("🪄 Error handling broker event: \(error, privacy: .public)")
                 }
             case .remove(let keys):
-                print("🪄 RECEIVED Remove \(keys)")
+                logger.debug("🪄 RECEIVED Remove \(keys)")
 
                 await removeInMemoryItems(matching: Set(keys.map(\.rawValue)))
             case .removeAll:
-                print("🪄 RECEIVED Remove All")
+                logger.debug("🪄 RECEIVED Remove All")
 
                 do {
                     try await performRemoveAll(persist: false)
                 } catch {
-                    print("🪄 Error handling broker event: \(error)")
+                    logger.error("🪄 Error handling broker event: \(error, privacy: .public)")
                 }
             }
         }
@@ -570,3 +569,5 @@ private extension Store {
     }
 
 }
+
+internal let kBoutiqueStoreSubsystem = "com.boutique.Store"
