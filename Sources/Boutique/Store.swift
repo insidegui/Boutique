@@ -1,6 +1,7 @@
-@_exported import Bodega
+@_exported @_spi(Boutique) import Bodega
 import OrderedCollections
 import Foundation
+import OSLog
 
 /// A fancy persistence layer.
 ///
@@ -45,7 +46,11 @@ import Foundation
 /// or even a type which can be converted into a `String` such as `\.url.path`.
 public final class Store<Item: Codable & Equatable>: ObservableObject {
 
+    private let logger = Logger(subsystem: kBoutiqueStoreSubsystem, category: "BoutiqueStore")
+
+    let id: String
     private let storageEngine: StorageEngine
+    let broker: StoreBroker
     private let cacheIdentifier: KeyPath<Item, String>
 
     /// The items held onto by the ``Store``.
@@ -89,14 +94,22 @@ public final class Store<Item: Codable & Equatable>: ObservableObject {
     ///
     /// - Parameters:
     ///   - storage: A `StorageEngine` to initialize a ``Store`` instance with.
+    ///   - broker: A `StoreBroker` used to synchronize the store with instances running in other processes.
     ///   - cacheIdentifier: A `KeyPath` from the `Item` pointing to a `String`, which the ``Store``
     ///   will use to create a unique identifier for the item when it's saved.
-    public init(storage: StorageEngine, cacheIdentifier: KeyPath<Item, String>) {
+    public init(storage: StorageEngine, broker: StoreBroker = NullStoreBroker(), cacheIdentifier: KeyPath<Item, String>) {
+        self.id = UUID().uuidString
         self.storageEngine = storage
+        self.broker = broker
         self.cacheIdentifier = cacheIdentifier
 
         // Begin loading items in the background.
         _ = self.loadStoreTask
+
+        broker.attach(self)
+
+        _ = self.brokerEventsTask
+        _ = self.storageEventsTask
     }
 
     /// Initializes a new ``Store`` for persisting items to a memory cache
@@ -104,13 +117,21 @@ public final class Store<Item: Codable & Equatable>: ObservableObject {
     ///
     /// - Parameters:
     ///   - storage: A `StorageEngine` to initialize a ``Store`` instance with.
+    ///   - broker: A `StoreBroker` used to synchronize the store with instances running in other processes.
     ///   - cacheIdentifier: A `KeyPath` from the `Item` pointing to a `String`, which the ``Store``
     ///   will use to create a unique identifier for the item when it's saved.
     @MainActor
-    public init(storage: StorageEngine, cacheIdentifier: KeyPath<Item, String>) async throws {
+    public init(storage: StorageEngine, broker: StoreBroker = NullStoreBroker(), cacheIdentifier: KeyPath<Item, String>) async throws {
+        self.id = UUID().uuidString
         self.storageEngine = storage
+        self.broker = broker
         self.cacheIdentifier = cacheIdentifier
         try await itemsHaveLoaded()
+
+        broker.attach(self)
+
+        _ = self.brokerEventsTask
+        _ = self.storageEventsTask
     }
 
     /// Awaits for ``items`` to be loaded.
@@ -170,7 +191,7 @@ public final class Store<Item: Codable & Equatable>: ObservableObject {
          message: "This method is functionally equivalent to `insert` and will be removed in a future release. After using Boutique in practice for a while I decided that insert was a more semantically correct name for this operation on a Store, if you'd like to learn more you can see the discussion here. https://github.com/mergesort/Boutique/discussions/36"
     )
     public func add(_ item: Item) async throws {
-        try await self.performInsert(item)
+        try await self.performInsert(item, persist: true)
     }
 
     /// Inserts an item into the ``Store``.
@@ -182,7 +203,7 @@ public final class Store<Item: Codable & Equatable>: ObservableObject {
     /// - Parameters:
     ///   - item: The item you are inserting into the ``Store``.
     public func insert(_ item: Item) async throws {
-        try await self.performInsert(item)
+        try await self.performInsert(item, persist: true)
     }
 
     /// Adds an array of items to the ``Store``.
@@ -228,7 +249,7 @@ public final class Store<Item: Codable & Equatable>: ObservableObject {
          message: "This method is functionally equivalent to `insert` and will be removed in a future release. After using Boutique in practice for a while I decided that insert was a more semantically correct name for this operation on a Store, if you'd like to learn more you can see the discussion here. https://github.com/mergesort/Boutique/discussions/36"
     )
     public func add(_ items: [Item]) async throws {
-        try await self.performInsert(items)
+        try await self.performInsert(items, persist: true)
     }
 
     /// Inserts an array of items into the ``Store``.
@@ -238,7 +259,7 @@ public final class Store<Item: Codable & Equatable>: ObservableObject {
     /// - Parameters:
     ///   - items: The items to insert into the store.
     public func insert(_ items: [Item]) async throws {
-        try await self.performInsert(items)
+        try await self.performInsert(items, persist: true)
     }
 
     /// Removes an item from the ``Store``.
@@ -253,7 +274,7 @@ public final class Store<Item: Codable & Equatable>: ObservableObject {
     /// Removes an item from the ``Store``.
     /// - Parameter item: The item you are removing from the ``Store``.
     public func remove(_ item: Item) async throws {
-        try await self.performRemove(item)
+        try await self.performRemove(item, persist: true)
     }
 
     /// Removes a list of items from the ``Store``.
@@ -274,7 +295,7 @@ public final class Store<Item: Codable & Equatable>: ObservableObject {
     /// multiple times to avoid making multiple separate dispatches to the `@MainActor`.
     /// - Parameter items: The items you are removing from the ``Store``.
     public func remove(_ items: [Item]) async throws {
-        try await self.performRemove(items)
+        try await self.performRemove(items, persist: true)
     }
 
     /// Removes all items from the store's memory cache and storage engine.
@@ -297,7 +318,7 @@ public final class Store<Item: Codable & Equatable>: ObservableObject {
     /// This method handles removing all of the data in one operation rather than iterating over every item
     /// in the ``Store``, avoiding multiple dispatches to the `@MainActor`, with far better performance.
     public func removeAll() async throws {
-        try await self.performRemoveAll()
+        try await self.performRemoveAll(persist: true)
     }
 
     /// A `Task` that will kick off loading items into the ``Store``.
@@ -305,6 +326,74 @@ public final class Store<Item: Codable & Equatable>: ObservableObject {
         let decoder = JSONDecoder()
         self.items = try await self.storageEngine.readAllData()
             .map({ try decoder.decode(Item.self, from: $0) })
+    }
+
+    private lazy var brokerEventsTask: Task<Void, Never> = Task {
+        let decoder = JSONDecoder()
+
+        for await event in broker.events {
+            switch event {
+            case .update(let keys):
+                logger.debug("🪄 RECEIVED Update \(keys)")
+
+                do {
+                    let items = try await self.storageEngine
+                        .read(keys: keys)
+                        .map({ try decoder.decode(Item.self, from: $0) })
+
+                    try await performInsert(items, persist: false)
+                } catch {
+                    logger.error("🪄 Error handling broker event: \(error, privacy: .public)")
+                }
+            case .remove(let keys):
+                logger.debug("🪄 RECEIVED Remove \(keys)")
+
+                await removeInMemoryItems(matching: Set(keys.map(\.rawValue)))
+            case .removeAll:
+                logger.debug("🪄 RECEIVED Remove All")
+
+                do {
+                    try await performRemoveAll(persist: false)
+                } catch {
+                    logger.error("🪄 Error handling broker event: \(error, privacy: .public)")
+                }
+            }
+        }
+    }
+
+    private lazy var storageEventsTask: Task<Void, Never> = Task {
+        guard let notifyingEngine = storageEngine as? NotifyingStorageEngine else { return }
+
+        let decoder = JSONDecoder()
+
+        for await event in await notifyingEngine.incomingEvents {
+            switch event {
+            case .update(let keys):
+                logger.debug("🪄 RECEIVED Update \(keys)")
+
+                do {
+                    let items = try await self.storageEngine
+                        .read(keys: keys)
+                        .map({ try decoder.decode(Item.self, from: $0) })
+
+                    try await performInsert(items, persist: false)
+                } catch {
+                    logger.error("🪄 Error handling broker event: \(error, privacy: .public)")
+                }
+            case .remove(let keys):
+                logger.debug("🪄 RECEIVED Remove \(keys)")
+
+                await removeInMemoryItems(matching: Set(keys.map(\.rawValue)))
+            case .removeAll:
+                logger.debug("🪄 RECEIVED Remove All")
+
+                do {
+                    try await performRemoveAll(persist: false)
+                } catch {
+                    logger.error("🪄 Error handling broker event: \(error, privacy: .public)")
+                }
+            }
+        }
     }
 
 }
@@ -339,15 +428,17 @@ public extension Store {
 }
 #endif
 
-// Internal versions of the `insert`, `remove`, and `removeAll` function code paths so we can avoid duplicating code.
+/// Internal versions of the `insert`, `remove`, and `removeAll` function code paths so we can avoid duplicating code.
+/// The `persist` argument determines whether to write the changes out to the storage engine and send broker events,
+/// or just update the in-memory state. The latter is used when handling broker events received from other store instances.
 internal extension Store {
 
-    func performInsert(_ item: Item, firstRemovingExistingItems existingItemsStrategy: ItemRemovalStrategy<Item>? = nil) async throws {
+    func performInsert(_ item: Item, firstRemovingExistingItems existingItemsStrategy: ItemRemovalStrategy<Item>? = nil, persist: Bool = true) async throws {
         var currentItems = await self.items
 
         if let strategy = existingItemsStrategy {
             // Remove items from disk and memory based on the cache invalidation strategy
-            try await self.removeItems(withStrategy: strategy, items: &currentItems)
+            try await self.removeItems(withStrategy: strategy, items: &currentItems, persist: persist)
         }
 
         // Take the current items array and turn it into an OrderedDictionary.
@@ -356,20 +447,22 @@ internal extension Store {
         var currentValuesDictionary = OrderedDictionary<String, Item>(uniqueKeys: currentItemsKeys, values: currentItems)
         currentValuesDictionary[identifier] = item
 
-        // We persist only the newly added items, rather than rewriting all of the items
-        try await self.persistItem(item)
+        if persist {
+            // We persist only the newly added items, rather than rewriting all of the items
+            try await self.persistItem(item)
+        }
 
         await MainActor.run { [currentValuesDictionary] in
             self.items = Array(currentValuesDictionary.values)
         }
     }
 
-    func performInsert(_ items: [Item], firstRemovingExistingItems existingItemsStrategy: ItemRemovalStrategy<Item>? = nil) async throws {
+    func performInsert(_ items: [Item], firstRemovingExistingItems existingItemsStrategy: ItemRemovalStrategy<Item>? = nil, persist: Bool = true) async throws {
         var currentItems = await self.items
 
         if let strategy = existingItemsStrategy {
             // Remove items from disk and memory based on the cache invalidation strategy
-            try await self.removeItems(withStrategy: strategy, items: &currentItems)
+            try await self.removeItems(withStrategy: strategy, items: &currentItems, persist: persist)
         }
 
         var insertedItemsDictionary = OrderedDictionary<String, Item>()
@@ -391,32 +484,38 @@ internal extension Store {
             currentValuesDictionary[identifier] = item.value
         }
 
-        // We persist only the newly added items, rather than rewriting all of the items
-        try await self.persistItems(Array(insertedItemsDictionary.values))
+        if persist {
+            // We persist only the newly added items, rather than rewriting all of the items
+            try await self.persistItems(Array(insertedItemsDictionary.values))
+        }
 
         await MainActor.run { [currentValuesDictionary] in
             self.items = Array(currentValuesDictionary.values)
         }
     }
 
-    func performRemove(_ item: Item) async throws {
-        try await self.removePersistedItem(item)
+    func performRemove(_ item: Item, persist: Bool = true) async throws {
+        if persist {
+            try await self.removePersistedItem(item)
+        }
 
         let cacheKeyString = item[keyPath: self.cacheIdentifier]
         let itemKeys = Set([cacheKeyString])
 
-        await MainActor.run {
-            self.items.removeAll(where: { item in
-                itemKeys.contains(item[keyPath: self.cacheIdentifier])
-            })
-        }
+        await removeInMemoryItems(matching: itemKeys)
     }
 
-    func performRemove(_ items: [Item]) async throws {
+    func performRemove(_ items: [Item], persist: Bool = true) async throws {
         let itemKeys = Set(items.map({ $0[keyPath: self.cacheIdentifier] }))
 
-        try await self.removePersistedItems(items: items)
+        if persist {
+            try await self.removePersistedItems(items: items)
+        }
 
+        await removeInMemoryItems(matching: itemKeys)
+    }
+
+    func removeInMemoryItems(matching itemKeys: Set<String>) async {
         await MainActor.run {
             self.items.removeAll(where: { item in
                 itemKeys.contains(item[keyPath: self.cacheIdentifier])
@@ -424,8 +523,12 @@ internal extension Store {
         }
     }
 
-    func performRemoveAll() async throws {
-        try await self.storageEngine.removeAllData()
+    func performRemoveAll(persist: Bool = true) async throws {
+        if persist {
+            try await self.storageEngine.removeAllData()
+
+            await broker.send(.removeAll)
+        }
 
         await MainActor.run {
             self.items = []
@@ -441,6 +544,8 @@ private extension Store {
         let encoder = JSONEncoder()
 
         try await self.storageEngine.write(try encoder.encode(item), key: cacheKey)
+
+        await broker.send(.update([cacheKey]))
     }
 
     func persistItems(_ items: [Item]) async throws {
@@ -450,19 +555,25 @@ private extension Store {
             .map({ (key: $0, data: try encoder.encode($1)) })
 
         try await self.storageEngine.write(dataAndKeys)
+
+        await broker.send(.update(itemKeys))
     }
 
     func removePersistedItem(_ item: Item) async throws {
         let cacheKey = CacheKey(item[keyPath: self.cacheIdentifier])
         try await self.storageEngine.remove(key: cacheKey)
+
+        await broker.send(.remove([cacheKey]))
     }
 
     func removePersistedItems(items: [Item]) async throws {
         let itemKeys = items.map({ CacheKey($0[keyPath: self.cacheIdentifier]) })
         try await self.storageEngine.remove(keys: itemKeys)
+
+        await broker.send(.remove(itemKeys))
     }
 
-    func removeItems(withStrategy strategy: ItemRemovalStrategy<Item>, items: inout [Item]) async throws {
+    func removeItems(withStrategy strategy: ItemRemovalStrategy<Item>, items: inout [Item], persist: Bool = true) async throws {
         let itemsToRemove = strategy.removedItems(items)
 
         // If we're using the `.removeNone` strategy then there are no items to invalidate and we can return early
@@ -472,17 +583,28 @@ private extension Store {
         // Else, we're using a strategy and need to iterate over all of the `itemsToInvalidate` and invalidate them
         if items.count == itemsToRemove.count {
             items = []
-            try await self.storageEngine.removeAllData()
+
+            if persist {
+                try await self.storageEngine.removeAllData()
+
+                await broker.send(.removeAll)
+            }
         } else {
             items = items.filter { !itemsToRemove.contains($0) }
             let itemKeys = items.map({ CacheKey(verbatim: $0[keyPath: self.cacheIdentifier]) })
 
-            if itemKeys.count == 1 {
-                try await self.storageEngine.remove(key: itemKeys[0])
-            } else {
-                try await self.storageEngine.remove(keys: itemKeys)
+            if persist {
+                if itemKeys.count == 1 {
+                    try await self.storageEngine.remove(key: itemKeys[0])
+                } else {
+                    try await self.storageEngine.remove(keys: itemKeys)
+                }
+
+                await broker.send(.remove(itemKeys))
             }
         }
     }
 
 }
+
+internal let kBoutiqueStoreSubsystem = "com.boutique.Store"
